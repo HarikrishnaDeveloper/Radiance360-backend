@@ -75,7 +75,12 @@ app.use(
 
 // ─── Health Check ─────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
-  res.json({ success: true, message: 'CRM API is running', timestamp: new Date().toISOString() });
+  res.json({
+    success: true,
+    status: 'healthy',
+    environment: env.NODE_ENV,
+    timestamp: new Date().toISOString()
+  });
 });
 
 // ─── API Routes ───────────────────────────────────────────────────────────────
