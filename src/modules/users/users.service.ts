@@ -340,7 +340,7 @@ export async function deleteUser(id: string, actor: { id: string; role: string }
     // 2. Clear references in other records (nullify where possible)
     await tx.user.updateMany({ where: { requestedById: id }, data: { requestedById: null } });
     await tx.user.updateMany({ where: { approvedById: id }, data: { approvedById: null } });
-    await tx.attendance.updateMany({ where: { permissionApprovedById: id }, data: { permissionApprovedById: null } });
+    await tx.permission.updateMany({ where: { approvedById: id }, data: { approvedById: null } });
 
     // 3. Finally delete the user
     return tx.user.delete({ where: { id } });

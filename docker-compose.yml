@@ -6,15 +6,15 @@ services:
     container_name: crm_postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: crm_user
-      POSTGRES_PASSWORD: crm_pass
-      POSTGRES_DB: crm_db
+      POSTGRES_USER: radience_user
+      POSTGRES_PASSWORD: radience_pass
+      POSTGRES_DB: radience_db
     ports:
       - '5432:5432'
     volumes:
       - crm_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U crm_user -d crm_db']
+      test: ['CMD-SHELL', 'pg_isready -U radience_user -d radience_db']
       interval: 10s
       timeout: 5s
       retries: 5
@@ -27,7 +27,7 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      DATABASE_URL: postgresql://crm_user:crm_pass@postgres:5432/crm_db
+      DATABASE_URL: postgresql://radience_user:radience_pass@postgres:5432/radience_db
       UPLOAD_DIR: /uploads
     ports:
       - '5000:5000'

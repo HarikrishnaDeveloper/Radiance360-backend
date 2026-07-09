@@ -23,6 +23,7 @@ router.patch('/permission/:id/approve', requireManager, ctrl.approvePermission);
 router.patch('/permission/:id/reject',  requireManager, ctrl.rejectPermission);
 
 // ── Attendance correction requests ────────────────────────────────────────────
+router.patch('/percentage/:id',              ctrl.updatePlanPercentage);
 router.post('/correction/request',           ctrl.createCorrectionRequest);
 router.get('/correction/requests',           ctrl.getCorrectionRequests);
 router.patch('/correction/:id/review', requireManager, ctrl.reviewCorrectionRequest);

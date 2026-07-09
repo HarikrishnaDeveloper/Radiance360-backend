@@ -11,7 +11,7 @@ async function bootstrap() {
 
     // Start HTTP server
     const server = app.listen(env.PORT, () => {
-      logger.info(`🚀 CRM API started on port ${env.PORT}`);
+      logger.info(`🚀 Radience360 API started on port ${env.PORT}`);
       logger.info(`📝 Environment: ${env.NODE_ENV}`);
     });
 

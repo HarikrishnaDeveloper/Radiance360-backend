@@ -21,23 +21,64 @@ async function getCheckInStatus(time: Date): Promise<CheckInStatus> {
   const graceMinutes = parseInt(await getConfig('gracePeriodMinutes', '15'), 10);
   const [h, m] = startTimeStr.split(':').map(Number);
 
-  const officialStart = new Date(time);
-  officialStart.setHours(h, m, 0, 0);
+  const istFormatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Kolkata',
+    hour: 'numeric',
+    minute: 'numeric',
+    hour12: false,
+  });
+  
+  let currentH = 0;
+  let currentM = 0;
+  istFormatter.formatToParts(time).forEach(p => {
+    if (p.type === 'hour') currentH = parseInt(p.value, 10);
+    if (p.type === 'minute') currentM = parseInt(p.value, 10);
+  });
+  if (currentH === 24) currentH = 0;
 
-  // ON_TIME = within grace period after official start
-  const graceCutoff = new Date(officialStart);
-  graceCutoff.setMinutes(graceCutoff.getMinutes() + graceMinutes);
-  if (time <= graceCutoff) return 'ON_TIME';
+  const currentMinutes = currentH * 60 + currentM;
+  const officialMinutes = h * 60 + m;
+  const graceCutoffMinutes = officialMinutes + graceMinutes;
+  const veryLateCutoffMinutes = officialMinutes + 120;
 
-  // VERY_LATE = 2+ hours after official start
-  const veryLateCutoff = new Date(officialStart);
-  veryLateCutoff.setHours(veryLateCutoff.getHours() + 2);
-  if (time > veryLateCutoff) return 'VERY_LATE';
-
+  if (currentMinutes <= graceCutoffMinutes) return 'ON_TIME';
+  if (currentMinutes > veryLateCutoffMinutes) return 'VERY_LATE';
   return 'LATE';
 }
 
 // ── Employee Actions ───────────────────────────────────────────────────────────
+
+
+export async function calculateAttendance(record: any, permissions: any[]): Promise<any> {
+  const isWeekend = record.date.getDay() === 0;
+  const halfDayHours = parseFloat(await getConfig('halfDayHours', '4'));
+  const fullDayHours = parseFloat(await getConfig('fullDayHours', '8'));
+
+  if (!record.checkOut) return 'PENDING';
+  const totalHours = record.totalHours ?? 0;
+
+  let workedStatus = 'ABSENT';
+  if (totalHours >= fullDayHours) workedStatus = 'FULL';
+  else if (totalHours >= halfDayHours) workedStatus = 'HALF';
+
+  if (isWeekend) return workedStatus !== 'ABSENT' ? 'WEEK_OFF_WORKED' : 'WEEK_OFF';
+
+  const approvedLeave = permissions.some((p: any) => p.type === 'LEAVE' && p.status === 'APPROVED');
+  if (approvedLeave) return 'LEAVE';
+
+  const approvedHalfDayLeave = permissions.some((p: any) => p.type === 'HALF_DAY' && p.status === 'APPROVED');
+  if (approvedHalfDayLeave) return (workedStatus === 'FULL' || workedStatus === 'HALF') ? 'HALF_DAY_LEAVE_PRESENT' : 'HALF_DAY';
+
+  if (workedStatus === 'FULL') {
+    if (record.checkInStatus === 'ON_TIME') return 'PRESENT';
+    if (record.checkInStatus === 'LATE' || record.checkInStatus === 'VERY_LATE') {
+      const approvedLatePerm = permissions.some((p: any) => p.type === 'LATE_PERMISSION' && p.status === 'APPROVED');
+      return approvedLatePerm ? 'PRESENT' : 'LATE_PRESENT';
+    }
+  }
+  if (workedStatus === 'HALF') return 'HALF_DAY';
+  return 'ABSENT';
+}
 
 export async function checkIn(userId: string) {
   const today = getTodayDate();
@@ -52,12 +93,11 @@ export async function checkIn(userId: string) {
 
   const now = new Date();
   const cis = await getCheckInStatus(now);
-  const status: AttendanceStatus = cis === 'ON_TIME' ? 'PRESENT' : 'LATE';
 
-  const record = await prisma.attendance.upsert({
+  let record = await prisma.attendance.upsert({
     where: { userId_date: { userId, date: today } },
-    create: { userId, date: today, checkIn: now, status, checkInStatus: cis },
-    update: { checkIn: now, status, checkInStatus: cis },
+    create: { userId, date: today, checkIn: now, status: 'PENDING', checkInStatus: cis },
+    update: { checkIn: now, status: 'PENDING', checkInStatus: cis },
   });
 
   if (cis !== 'ON_TIME') {
@@ -89,12 +129,9 @@ export async function checkIn(userId: string) {
   return record;
 }
 
-export async function checkOut(userId: string, dayCompletion?: string) {
+export async function checkOut(userId: string, dayCompletion?: string, planPercentage?: number) {
   const today = getTodayDate();
-
-  const record = await prisma.attendance.findUnique({
-    where: { userId_date: { userId, date: today } },
-  });
+  const record = await prisma.attendance.findUnique({ where: { userId_date: { userId, date: today } } });
 
   if (!record?.checkIn) throw new AppError('Must check in before checking out', 400);
   if (record.checkOut) throw new AppError('Already checked out today', 400);
@@ -102,9 +139,10 @@ export async function checkOut(userId: string, dayCompletion?: string) {
   const now = new Date();
   const totalHours = (now.getTime() - record.checkIn.getTime()) / 3_600_000;
 
-  const halfDayThreshold = parseFloat(await getConfig('halfDayHours', '4'));
-  let status: AttendanceStatus = record.status;
-  if (totalHours < halfDayThreshold && status !== 'LEAVE') status = 'HALF_DAY';
+  const permissions = await prisma.permission.findMany({ where: { userId, date: today } });
+  
+  const tempRecord = { ...record, checkOut: now, totalHours: parseFloat(totalHours.toFixed(2)) };
+  const status = await calculateAttendance(tempRecord, permissions);
 
   const updated = await prisma.attendance.update({
     where: { userId_date: { userId, date: today } },
@@ -112,9 +150,11 @@ export async function checkOut(userId: string, dayCompletion?: string) {
       checkOut: now,
       totalHours: parseFloat(totalHours.toFixed(2)),
       dayCompletion: dayCompletion ?? record.dayCompletion,
+      planPercentage: planPercentage !== undefined ? planPercentage : record.planPercentage,
       status,
     },
   });
+
   emitGlobal('attendance:updated', updated);
   return updated;
 }
@@ -143,6 +183,35 @@ export async function submitMorningPlan(userId: string, content: string) {
   });
 }
 
+export async function updatePlanPercentage(attendanceId: string, userId: string, role: string, percentage: number) {
+  const record = await prisma.attendance.findUnique({
+    where: { id: attendanceId },
+    include: { user: true },
+  });
+
+  if (!record) throw new AppError('Attendance record not found', 404);
+
+  if (role !== 'SUPER_ADMIN' && role !== 'ADMIN') {
+    if (record.userId === userId) {
+      if (record.checkOut !== null) {
+        throw new AppError('You have already checked out. Only your team leader can modify your score now.', 403);
+      }
+    } else {
+      if (record.user.managerId !== userId) {
+        throw new AppError("You are not authorized to edit this employee's percentage.", 403);
+      }
+    }
+  }
+
+  const updated = await prisma.attendance.update({
+    where: { id: attendanceId },
+    data: { planPercentage: percentage },
+  });
+
+  emitGlobal('attendance:updated', updated);
+  return updated;
+}
+
 export async function getTodayAttendance(userId: string) {
   const today = getTodayDate();
 
@@ -156,7 +225,7 @@ export async function getTodayAttendance(userId: string) {
     data: {
       userId,
       date: today,
-      status: isSunday(today) ? 'SUNDAY' : 'NOT_MARKED',
+      status: isSunday(today) ? 'WEEK_OFF' : 'NOT_MARKED',
     },
   });
 }
@@ -176,12 +245,7 @@ export async function getMyAttendance(userId: string, month?: number, year?: num
 
 // ── Permissions ────────────────────────────────────────────────────────────────
 
-export async function applyPermission(
-  userId: string,
-  permissionType: PermissionType,
-  reason: string,
-  dateStr?: string,
-) {
+export async function applyPermission(userId: string, permissionType: PermissionType, reason: string, dateStr?: string) {
   const [reasonMandatory, allowBackdated, approvalRequired, notifyPermSubmitted] = await Promise.all([
     getConfig('reasonMandatory', 'true').then(v => v === 'true'),
     getConfig('allowBackdated', 'false').then(v => v === 'true'),
@@ -190,264 +254,109 @@ export async function applyPermission(
   ]);
 
   if (reasonMandatory && (!reason || !reason.trim())) throw new AppError('Reason is required.', 400);
-  if (reason && !/^[a-zA-Z0-9\s]+$/.test(reason)) throw new AppError('Invalid Reason: Reason must contain only letters, numbers, and spaces.', 400);
-
+  
   const target = dateStr ? new Date(dateStr) : new Date();
   target.setUTCHours(0, 0, 0, 0);
 
   const today = new Date();
   today.setUTCHours(0, 0, 0, 0);
 
-  if (!allowBackdated && target < today) throw new AppError('Invalid Date: Backdated permissions are not allowed. Contact your admin.', 400);
+  if (!allowBackdated && target < today) throw new AppError('Invalid Date: Backdated permissions are not allowed.', 400);
 
-  const existing = await prisma.attendance.findUnique({
-    where: { userId_date: { userId, date: target } },
-  });
-
-  if (existing && (existing.permission === 'PENDING' || existing.permission === 'APPROVED')) {
-    const statusText = existing.permission.toLowerCase();
-    const typeText = existing.permissionType?.replace('_', ' ').toLowerCase() || 'attendance';
-    throw new AppError(`You already have a ${statusText} ${typeText} request for this date (${target.toLocaleDateString()}). No new request is needed.`, 400);
+  const existingPerms = await prisma.permission.findMany({ where: { userId, date: target } });
+  if (existingPerms.some((p: any) => p.type === permissionType && (p.status === 'PENDING' || p.status === 'APPROVED'))) {
+    throw new AppError('You already have a request of this type for this date.', 400);
   }
 
-  const initialStatus: PermissionStatus = approvalRequired ? 'PENDING' : 'APPROVED';
+  const initialStatus = approvalRequired ? 'PENDING' : 'APPROVED';
 
-  // Compute attendance status changes for auto-approval
-  let attendanceStatus: AttendanceStatus = existing?.status ?? 'NOT_MARKED';
-  let checkInStatusOverride = existing?.checkInStatus ?? null;
+  const newPerm = await prisma.permission.create({
+    data: { userId, date: target, type: permissionType, reason, status: initialStatus }
+  });
+
   if (!approvalRequired) {
-    if (permissionType === 'HALF_DAY') attendanceStatus = 'HALF_DAY';
-    else if (permissionType === 'LEAVE') attendanceStatus = 'LEAVE';
-    else if (permissionType === 'LATE_PERMISSION') checkInStatusOverride = 'ON_TIME';
-  }
-
-  const record = await prisma.attendance.upsert({
-    where: { userId_date: { userId, date: target } },
-    create: {
-      userId, date: target, status: attendanceStatus,
-      permission: initialStatus, permissionType, permissionReason: reason,
-      checkInStatus: checkInStatusOverride,
-    },
-    update: {
-      permission: initialStatus, permissionType, permissionReason: reason,
-      status: attendanceStatus, checkInStatus: checkInStatusOverride,
-    },
-  });
-
-  if (notifyPermSubmitted) {
-    const user = await prisma.user.findUnique({ where: { id: userId } });
-    if (user) {
-      const recipients = new Set<string>();
-      if (user.managerId) recipients.add(user.managerId);
-      
-      const targetRoles = ['SUPER_ADMIN'];
-      if (user.role === 'EMPLOYEE' || user.role === 'MANAGER') {
-        targetRoles.push('ADMIN');
-      }
-      
-      const higherUps = await prisma.user.findMany({
-        where: { role: { in: targetRoles as any }, status: 'ACTIVE' },
-        select: { id: true },
-      });
-      higherUps.forEach(a => recipients.add(a.id));
-
-      await createNotification({
-        userId,
-        title: approvalRequired ? 'Request Submitted' : 'Request Auto-Approved',
-        message: approvalRequired
-          ? `Your request for ${permissionType.replace(/_/g, ' ')} on ${target.toDateString()} has been sent for approval.`
-          : `Your request for ${permissionType.replace(/_/g, ' ')} on ${target.toDateString()} has been automatically approved.`,
-        type: 'PERMISSION_SENT',
-        link: '/permissions',
-      });
-
-      if (approvalRequired) {
-        for (const recipientId of recipients) {
-          if (recipientId === userId) continue;
-          await createNotification({
-            userId: recipientId,
-            title: 'Approval Required',
-            message: `${user.name} has requested a ${permissionType.replace(/_/g, ' ')} for ${target.toDateString()}. Please review and approve.`,
-            type: 'PERMISSION_REQUEST',
-            link: '/permissions',
-          });
-        }
-      }
+    const record = await prisma.attendance.findUnique({ where: { userId_date: { userId, date: target } } });
+    if (record) {
+      const allPerms = [...existingPerms, newPerm];
+      const newStatus = await calculateAttendance(record, allPerms);
+      await prisma.attendance.update({ where: { id: record.id }, data: { status: newStatus } });
+      emitGlobal('attendance:updated', { ...record, status: newStatus });
     }
   }
 
-  emitGlobal('attendance:updated', record);
-  return record;
+  return newPerm;
 }
 
-export async function updateMyPermission(id: string, userId: string, data: { permissionType?: PermissionType, reason?: string, dateStr?: string }) {
-  const existing = await prisma.attendance.findUnique({ where: { id } });
-  if (!existing) throw new AppError('Record not found', 404);
-  if (existing.userId !== userId) throw new AppError('Forbidden', 403);
-  if (existing.permission !== 'PENDING') throw new AppError('Only pending permissions can be edited', 400);
+export async function updateMyPermission(id: string, userId: string, data: { reason?: string }) {
+  const perm = await prisma.permission.findUnique({ where: { id } });
+  if (!perm || perm.userId !== userId) throw new AppError('Permission request not found.', 404);
+  if (perm.status !== 'PENDING') throw new AppError('Only pending permissions can be updated.', 400);
 
-  const updateData: any = {};
-  if (data.permissionType) updateData.permissionType = data.permissionType;
-  if (data.reason) updateData.permissionReason = data.reason;
-
-  if (data.dateStr) {
-    const targetDate = new Date(data.dateStr);
-    targetDate.setUTCHours(0, 0, 0, 0);
-    if (existing.date.getTime() !== targetDate.getTime()) {
-      const conflict = await prisma.attendance.findUnique({
-        where: { userId_date: { userId, date: targetDate } }
-      });
-      if (conflict && (conflict.permission === 'PENDING' || conflict.permission === 'APPROVED')) {
-        throw new AppError('Another attendance/permission record already exists on that date.', 400);
-      }
-      updateData.date = targetDate;
-    }
-  }
-
-  const updated = await prisma.attendance.update({
-    where: { id },
-    data: updateData
-  });
-  
-  emitGlobal('attendance:updated', updated);
-  return updated;
+  return prisma.permission.update({ where: { id }, data: { reason: data.reason } });
 }
 
 export async function deleteMyPermission(id: string, userId: string) {
-  const existing = await prisma.attendance.findUnique({ where: { id } });
-  if (!existing) throw new AppError('Record not found', 404);
-  if (existing.userId !== userId) throw new AppError('Forbidden', 403);
-  if (existing.permission !== 'PENDING') throw new AppError('Only pending permissions can be deleted', 400);
+  const perm = await prisma.permission.findUnique({ where: { id } });
+  if (!perm || perm.userId !== userId) throw new AppError('Permission request not found.', 404);
+  if (perm.status !== 'PENDING') throw new AppError('Only pending permissions can be deleted.', 400);
 
-  const updated = await prisma.attendance.update({
-    where: { id },
-    data: {
-      permission: 'NONE',
-      permissionType: null,
-      permissionReason: null,
-    }
-  });
-
-  emitGlobal('attendance:updated', updated);
-  return updated;
+  await prisma.permission.delete({ where: { id } });
+  return { success: true };
 }
 
-export async function getPendingPermissions(requesterId: string, requesterRole: string) {
-  const baseWhere = {
-    permission: { not: 'NONE' as PermissionStatus }
-  };
+export async function getPendingPermissions(managerId?: string) {
+  const adminExclusion = { user: { role: { notIn: ['SUPER_ADMIN', 'ADMIN'] as any } } };
 
-  if (requesterRole === 'MANAGER') {
-    const team = await prisma.user.findMany({ where: { managerId: requesterId, status: 'ACTIVE' } });
-    const ids = team.map((m) => m.id);
-    return prisma.attendance.findMany({
-      where: { ...baseWhere, userId: { in: ids } },
-      include: { user: { select: { id: true, name: true, email: true, role: true } } },
+  if (managerId) {
+    const team = await prisma.user.findMany({ where: { managerId, status: 'ACTIVE' } });
+    if (!team.length) return [];
+    return prisma.permission.findMany({
+      where: { status: 'PENDING', userId: { in: team.map(t => t.id) } },
+      include: { user: { select: { id: true, name: true, role: true } } },
       orderBy: { date: 'desc' },
     });
   }
 
-  if (requesterRole === 'ADMIN') {
-    return prisma.attendance.findMany({
-      where: { ...baseWhere, user: { role: { in: ['MANAGER', 'EMPLOYEE'] } } },
-      include: { user: { select: { id: true, name: true, email: true, role: true } } },
-      orderBy: { date: 'desc' },
-    });
-  }
-
-  return prisma.attendance.findMany({
-    where: baseWhere,
-    include: { user: { select: { id: true, name: true, email: true, role: true } } },
+  return prisma.permission.findMany({
+    where: { status: 'PENDING', ...adminExclusion },
+    include: { user: { select: { id: true, name: true, role: true } } },
     orderBy: { date: 'desc' },
   });
 }
 
 export async function approvePermission(id: string, approverId: string) {
-  const record = await prisma.attendance.findUnique({
+  const pendingPerm = await prisma.permission.findUnique({ where: { id } });
+  if (!pendingPerm || pendingPerm.status !== 'PENDING') throw new AppError('No pending permission request found.', 404);
+
+  const updatedPerm = await prisma.permission.update({
     where: { id },
-    include: { user: { select: { role: true } } },
-  });
-  if (!record) throw new AppError('Record not found', 404);
-  if (record.permission !== 'PENDING') throw new AppError('Permission is not pending', 400);
-
-  const approver = await prisma.user.findUnique({ where: { id: approverId } });
-  if (!approver) throw new AppError('Approver not found', 404);
-
-  if (record.user.role === 'ADMIN' && approver.role !== 'SUPER_ADMIN') {
-    throw new AppError('Only Super Admins can approve Admin leave requests', 403);
-  }
-
-  const [permissionAffects, notifyPermApproved] = await Promise.all([
-    getConfig('permissionAffects', 'true').then(v => v === 'true'),
-    getConfig('notifyPermApproved', 'true').then(v => v === 'true'),
-  ]);
-
-  let status: AttendanceStatus = record.status;
-  let checkInStatus = record.checkInStatus;
-  if (permissionAffects) {
-    if (record.permissionType === 'HALF_DAY') status = 'HALF_DAY';
-    else if (record.permissionType === 'LEAVE') status = 'LEAVE';
-    else if (record.permissionType === 'LATE_PERMISSION') checkInStatus = 'ON_TIME';
-  }
-
-  const updated = await prisma.attendance.update({
-    where: { id },
-    data: { permission: 'APPROVED', permissionApprovedById: approverId, status, checkInStatus },
+    data: { status: 'APPROVED', approvedById: approverId },
   });
 
-  const typeStr = (record.permissionType || 'permission').replace('_', ' ').toLowerCase();
-  const dateStr = record.date instanceof Date ? record.date.toDateString() : new Date(record.date).toDateString();
-
-  if (notifyPermApproved) {
-    await createNotification({
-      userId: record.userId,
-      title: 'Permission Approved',
-      message: `Your request for ${typeStr} on ${dateStr} has been approved.`,
-      type: 'PERMISSION_APPROVED',
-      link: '/permissions',
+  const record = await prisma.attendance.findUnique({ where: { userId_date: { userId: pendingPerm.userId, date: pendingPerm.date } } });
+  if (record) {
+    const allPerms = await prisma.permission.findMany({ where: { userId: pendingPerm.userId, date: pendingPerm.date } });
+    const newStatus = await calculateAttendance(record, allPerms);
+    await prisma.attendance.update({
+      where: { id: record.id },
+      data: { status: newStatus }
     });
+    emitGlobal('attendance:updated', { ...record, status: newStatus });
   }
 
-  emitGlobal('attendance:updated', updated);
-  return updated;
+  return updatedPerm;
 }
 
 export async function rejectPermission(id: string, approverId: string) {
-  const record = await prisma.attendance.findUnique({
+  const pendingPerm = await prisma.permission.findUnique({ where: { id } });
+  if (!pendingPerm || pendingPerm.status !== 'PENDING') throw new AppError('No pending permission request found.', 404);
+
+  const updatedPerm = await prisma.permission.update({
     where: { id },
-    include: { user: { select: { role: true } } },
-  });
-  if (!record) throw new AppError('Record not found', 404);
-  if (record.permission !== 'PENDING') throw new AppError('Permission is not pending', 400);
-
-  const approver = await prisma.user.findUnique({ where: { id: approverId } });
-  if (!approver) throw new AppError('Approver not found', 404);
-
-  if (record.user.role === 'ADMIN' && approver.role !== 'SUPER_ADMIN') {
-    throw new AppError('Only Super Admins can reject Admin leave requests', 403);
-  }
-
-  const updated = await prisma.attendance.update({
-    where: { id },
-    data: { permission: 'REJECTED', permissionApprovedById: approverId },
+    data: { status: 'REJECTED' },
   });
 
-  const typeStr = (record.permissionType || 'permission').replace('_', ' ').toLowerCase();
-  const dateStr = record.date instanceof Date ? record.date.toDateString() : new Date(record.date).toDateString();
-
-  const notifyPermRejected = (await getConfig('notifyPermRejected', 'true')) === 'true';
-  if (notifyPermRejected) {
-    await createNotification({
-      userId: record.userId,
-      title: 'Permission Rejected',
-      message: `Your request for ${typeStr} on ${dateStr} has been rejected.`,
-      type: 'PERMISSION_REJECTED',
-      link: '/permissions',
-    });
-  }
-
-  emitGlobal('attendance:updated', updated);
-  return updated;
+  return updatedPerm;
 }
 
 // ── Admin / Manager Views ──────────────────────────────────────────────────────
@@ -471,9 +380,9 @@ export async function getAllAttendance(
   year?: number,
   statusFilter?: string,
 ) {
-  // SUPER_ADMIN is never part of attendance calculations
+  // SUPER_ADMIN and ADMIN are never part of attendance calculations
   const andConditions: Record<string, unknown>[] = [
-    { user: { role: { not: 'SUPER_ADMIN' } } },
+    { user: { role: { notIn: ['SUPER_ADMIN', 'ADMIN'] } } },
   ];
 
   if (dateStr) {
@@ -493,7 +402,7 @@ export async function getAllAttendance(
       // Include both new LATE status and legacy PRESENT records with LATE checkInStatus
       andConditions.push({
         OR: [
-          { status: 'LATE' },
+          { status: 'LATE_PRESENT' },
           { status: 'PRESENT', checkInStatus: { in: ['LATE', 'VERY_LATE'] } },
         ],
       });
@@ -518,7 +427,7 @@ export async function adminOverride(
     status?: AttendanceStatus;
     checkIn?: string | null;
     checkOut?: string | null;
-    permission?: PermissionStatus;
+    
     remarks?: string;
     checkInStatus?: CheckInStatus | null;
   },
@@ -539,7 +448,7 @@ export async function adminOverride(
 
   const update: Record<string, unknown> = {};
   if (data.status) update.status = data.status;
-  if (data.permission) update.permission = data.permission;
+  
   if (data.remarks !== undefined) update.remarks = data.remarks;
 
   if (data.checkIn !== undefined) {
@@ -577,19 +486,21 @@ export async function adminOverride(
 
 export async function autoMarkAttendance() {
   const today = getTodayDate();
-  const sunday = isSunday(today);
-
-  const [autoAbsentTimeStr, notifyMissedCheckIn] = await Promise.all([
-    getConfig('autoAbsentTime', '12:00'),
-    getConfig('notifyMissedCheckIn', 'true').then(v => v === 'true'),
-  ]);
-
-  const [abh, abm] = autoAbsentTimeStr.split(':').map(Number);
-  const now = new Date();
-  const pastAutoAbsentTime = now.getHours() > abh || (now.getHours() === abh && now.getMinutes() >= abm);
+  const weekend = isSunday(today);
 
   const users = await prisma.user.findMany({
-    where: { status: 'ACTIVE', role: { not: 'SUPER_ADMIN' } },
+    where: { status: 'ACTIVE', role: { notIn: ['SUPER_ADMIN', 'ADMIN'] } },
+  });
+
+  // 1. Mark missing checkouts from past days as PENDING
+  await prisma.attendance.updateMany({
+    where: {
+      date: { lt: today },
+      checkIn: { not: null },
+      checkOut: null,
+      status: { not: 'PENDING' },
+    },
+    data: { status: 'PENDING' },
   });
 
   const results = await Promise.all(
@@ -599,38 +510,14 @@ export async function autoMarkAttendance() {
       });
 
       if (existing) {
-        if (!sunday && existing.status === 'NOT_MARKED' && pastAutoAbsentTime) {
-          if (notifyMissedCheckIn) {
-            await createNotification({
-              userId: u.id,
-              title: 'Missed Check-In',
-              message: `You have been marked ABSENT for today as you did not check in before ${autoAbsentTimeStr}.`,
-              type: 'GENERAL',
-              link: '/attendance',
-            });
-          }
-          return prisma.attendance.update({
-            where: { userId_date: { userId: u.id, date: today } },
-            data: { status: 'ABSENT' },
-          });
-        }
         return existing;
       }
 
-      const defaultStatus: AttendanceStatus = sunday ? 'SUNDAY' : (pastAutoAbsentTime ? 'ABSENT' : 'NOT_MARKED');
+      const weekend = isSunday(today);
+    const defaultStatus: AttendanceStatus = weekend ? 'WEEK_OFF' : 'NOT_MARKED';
       const newRecord = await prisma.attendance.create({
         data: { userId: u.id, date: today, status: defaultStatus },
       });
-
-      if (!sunday && defaultStatus === 'ABSENT' && notifyMissedCheckIn) {
-        await createNotification({
-          userId: u.id,
-          title: 'Missed Check-In',
-          message: `You have been marked ABSENT for today as you did not check in before ${autoAbsentTimeStr}.`,
-          type: 'GENERAL',
-          link: '/attendance',
-        });
-      }
 
       return newRecord;
     }),
@@ -644,9 +531,9 @@ export async function autoMarkAttendance() {
 export async function getDashboardStats(role: string, userId: string) {
   const today = getTodayDate();
 
-  // SUPER_ADMIN records never count in attendance stats
-  const superAdminExclusion = { user: { role: { not: 'SUPER_ADMIN' as const } } };
-  let base: Record<string, unknown> = { date: today, ...superAdminExclusion };
+  // SUPER_ADMIN and ADMIN records never count in attendance stats
+  const adminExclusion: any = { user: { role: { notIn: ['SUPER_ADMIN', 'ADMIN'] } } };
+  let base: Record<string, unknown> = { date: today, ...adminExclusion };
 
   if (role === 'MANAGER') {
     const team = await prisma.user.findMany({ where: { managerId: userId, status: 'ACTIVE' } });
@@ -663,19 +550,19 @@ export async function getDashboardStats(role: string, userId: string) {
         where: {
           ...base,
           OR: [
-            { status: 'LATE' },
+            { status: 'LATE_PRESENT' },
             { status: 'PRESENT', checkInStatus: { in: ['LATE', 'VERY_LATE'] } },
           ],
         },
       }),
       prisma.attendance.count({ where: { ...base, status: 'HALF_DAY' } }),
-      prisma.attendance.count({ where: { permission: 'PENDING', ...superAdminExclusion } }),
-      prisma.attendance.count({ where: { ...base, permission: 'APPROVED' } }),
+      prisma.permission.count({ where: { status: 'PENDING', ...adminExclusion } }),
+      prisma.permission.count({ where: { status: 'APPROVED', userId: base.userId as any } }),
       // Active Now = checked in but not checked out
       prisma.attendance.count({ where: { ...base, checkIn: { not: null }, checkOut: null } }),
     ]);
 
-  const countLateAsPresent = (await getConfig('countLateAsPresent', 'true')) === 'true';
+  const countLateAsPresent = (await getConfig('countLateAsPresent', 'false')) === 'true';
 
   return {
     present: countLateAsPresent ? present + late : present,
@@ -694,7 +581,7 @@ export async function getTeamHierarchy(dateStr?: string) {
   const target = dateStr ? new Date(dateStr) : getTodayDate();
 
   const users = await prisma.user.findMany({
-    where: { status: 'ACTIVE', role: { not: 'SUPER_ADMIN' } },
+    where: { status: 'ACTIVE', role: { notIn: ['SUPER_ADMIN', 'ADMIN'] } },
     include: {
       attendance: { where: { date: target }, take: 1 },
     },
@@ -761,14 +648,14 @@ export async function getPerformanceStats(month: number, year: number) {
   }> = {};
 
   records.forEach(r => {
-    if (!r.user || r.status === 'SUNDAY') return;
+    if (!r.user || r.status === 'WEEK_OFF') return;
     if (!byUser[r.userId]) {
       byUser[r.userId] = { user: r.user, present: 0, late: 0, halfDay: 0, absent: 0, working: 0 };
     }
     const s = byUser[r.userId];
     s.working++;
     // LATE status (new) OR legacy: PRESENT with late checkInStatus
-    const isLate = r.status === 'LATE' || (r.checkInStatus === 'LATE' || r.checkInStatus === 'VERY_LATE');
+    const isLate = r.status === 'LATE_PRESENT';
     if (isLate) s.late++;
     else if (r.status === 'PRESENT') s.present++;
     else if (r.status === 'HALF_DAY') s.halfDay++;
@@ -1059,7 +946,7 @@ export async function getAttendanceReportData(opts: AttendanceReportOptions) {
     late: number;
     halfDay: number;
     leave: number;
-    sunday: number;
+    weekOff: number;
     notMarked: number;
     totalHours: number;
     rows: {
@@ -1085,13 +972,13 @@ export async function getAttendanceReportData(opts: AttendanceReportOptions) {
         email: r.user.email,
         role: r.user.role,
         present: 0, absent: 0, late: 0, halfDay: 0,
-        leave: 0, sunday: 0, notMarked: 0, totalHours: 0,
+        leave: 0, weekOff: 0, notMarked: 0, totalHours: 0,
         rows: [],
       });
     }
 
     const stat = byUser.get(uid)!;
-    const isLate = r.status === 'LATE' ||
+    const isLate = r.status === 'LATE_PRESENT' ||
       ((r.status === 'PRESENT') && (r.checkInStatus === 'LATE' || r.checkInStatus === 'VERY_LATE'));
 
     if (r.status === 'PRESENT' && !isLate) stat.present++;
@@ -1099,7 +986,7 @@ export async function getAttendanceReportData(opts: AttendanceReportOptions) {
     else if (r.status === 'ABSENT') stat.absent++;
     else if (r.status === 'HALF_DAY') stat.halfDay++;
     else if (r.status === 'LEAVE') stat.leave++;
-    else if (r.status === 'SUNDAY') stat.sunday++;
+    else if (r.status === 'WEEK_OFF') stat.weekOff++;
     else if (r.status === 'NOT_MARKED') stat.notMarked++;
 
     if (r.totalHours) stat.totalHours += r.totalHours;
@@ -1110,9 +997,9 @@ export async function getAttendanceReportData(opts: AttendanceReportOptions) {
       checkIn: formatTime(r.checkIn),
       checkOut: formatTime(r.checkOut),
       totalHours: r.totalHours != null ? r.totalHours.toFixed(2) : '-',
-      checkInStatus: r.checkInStatus ?? '-',
-      permission: r.permission,
-      permissionType: r.permissionType ?? '-',
+      checkInStatus: r.checkInStatus || '-',
+      permission: '-',
+      permissionType: '-',
       remarks: r.remarks ?? '-',
     });
   }
@@ -1156,7 +1043,7 @@ export function buildAttendanceCsvFromData(
     lines.push([
       `"${emp.name}"`, `"${emp.email}"`, `"${emp.role}"`,
       emp.present, emp.late, emp.absent, emp.halfDay,
-      emp.leave, emp.sunday, emp.notMarked,
+      emp.leave, emp.weekOff, emp.notMarked,
       `"${emp.totalHours.toFixed(2)}"`,
     ].join(','));
   }

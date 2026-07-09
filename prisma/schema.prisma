@@ -35,7 +35,8 @@ model User {
   approvedUsers User[]         @relation("ApproverToUsers")
 
   attendance            Attendance[]    @relation("UserAttendance")
-  permissionsApproved   Attendance[]    @relation("PermissionApprover")
+  permissions           Permission[]    @relation("UserPermissions")
+  permissionsApproved   Permission[]    @relation("PermissionApprover")
   correctionRequests    AttendanceCorrectionRequest[] @relation("UserCorrectionRequests")
   correctionReviewed    AttendanceCorrectionRequest[] @relation("CorrectionReviewer")
   attendanceAuditLogs   AttendanceAuditLog[]          @relation("AuditLogChangedBy")
@@ -289,17 +290,13 @@ model Attendance {
   morningPlan            String?
   afternoonPlan          String?
   dayCompletion          String?
-  permission             PermissionStatus @default(NONE)
-  permissionType         PermissionType?
-  permissionReason       String?
   remarks                String?
-  permissionApprovedById String?
   checkInStatus          CheckInStatus?
+  planPercentage         Int?
   createdAt              DateTime         @default(now())
   updatedAt              DateTime         @updatedAt
 
   user                 User  @relation("UserAttendance", fields: [userId], references: [id])
-  permissionApprovedBy User? @relation("PermissionApprover", fields: [permissionApprovedById], references: [id])
   auditLogs            AttendanceAuditLog[]
   correctionRequests   AttendanceCorrectionRequest[]
 
@@ -316,11 +313,16 @@ enum CheckInStatus {
 enum AttendanceStatus {
   NOT_MARKED
   PRESENT
+  LATE_PRESENT
   ABSENT
-  LATE
   HALF_DAY
   LEAVE
-  SUNDAY
+  HALF_DAY_LEAVE_PRESENT
+  HOLIDAY
+  WEEK_OFF
+  HOLIDAY_WORKED
+  WEEK_OFF_WORKED
+  PENDING
 }
 
 enum PermissionStatus {
@@ -334,6 +336,23 @@ enum PermissionType {
   HALF_DAY
   LEAVE
   LATE_PERMISSION
+}
+
+model Permission {
+  id           String           @id @default(uuid())
+  userId       String
+  date         DateTime         @db.Date
+  type         PermissionType
+  status       PermissionStatus @default(PENDING)
+  reason       String
+  approvedById String?
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  user         User             @relation("UserPermissions", fields: [userId], references: [id])
+  approvedBy   User?            @relation("PermissionApprover", fields: [approvedById], references: [id])
+
+  @@map("permissions")
 }
 
 model Note {

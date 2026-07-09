@@ -6,7 +6,7 @@ export function requestLogger(req: Request, res: Response, next: NextFunction) {
 
   // Log request body
   if (req.method !== 'GET' && Object.keys(req.body).length > 0) {
-    logger.debug(`${req.method} ${req.url} - Request Body: ${JSON.stringify(req.body, null, 2)}`);
+    logger.info(`${req.method} ${req.url} - Request Body: ${JSON.stringify(req.body, null, 2)}`);
   }
 
   // Intercept the send method to log response body
@@ -27,7 +27,7 @@ export function requestLogger(req: Request, res: Response, next: NextFunction) {
     if (res.statusCode >= 400) {
       logger.error(`${req.method} ${req.url} [${res.statusCode}] - ${duration}ms - Response: ${typeof bodyToLog === 'object' ? JSON.stringify(bodyToLog, null, 2) : bodyToLog}`);
     } else {
-      logger.debug(`${req.method} ${req.url} [${res.statusCode}] - ${duration}ms - Response: ${typeof bodyToLog === 'object' ? JSON.stringify(bodyToLog, null, 2) : '...' }`);
+      logger.info(`${req.method} ${req.url} [${res.statusCode}] - ${duration}ms - Response: ${typeof bodyToLog === 'object' ? JSON.stringify(bodyToLog, null, 2) : '...' }`);
     }
 
     return originalSend.call(this, body);

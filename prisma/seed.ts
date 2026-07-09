@@ -97,7 +97,7 @@ async function main() {
   const sourcesData = [
     'WALK IN',
     'CLIENT REFERRAL',
-    'CRM',
+    'Radience360',
     'JUST DIAL',
     'INSTAGRAM',
     'YOUTUBE',
@@ -225,7 +225,7 @@ async function main() {
   }
   console.log('✅ Task types created');
 
-  console.log('\n🎉 Seed complete! CRM is now clean and updated with ONLY your Excel data.');
+  console.log('\n🎉 Seed complete! Radience360 is now clean and updated with ONLY your Excel data.');
 }
 
 main()

@@ -12,7 +12,7 @@ export async function checkIn(req: Request, res: Response, next: NextFunction): 
 
 export async function checkOut(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const data = await svc.checkOut(req.user!.id, req.body.dayCompletion);
+    const data = await svc.checkOut(req.user!.id, req.body.dayCompletion, req.body.planPercentage);
     res.json({ success: true, data });
   } catch (e) { next(e); }
 }
@@ -20,6 +20,13 @@ export async function checkOut(req: Request, res: Response, next: NextFunction):
 export async function submitMorningPlan(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const data = await svc.submitMorningPlan(req.user!.id, req.body.morningPlan);
+    res.json({ success: true, data });
+  } catch (e) { next(e); }
+}
+
+export async function updatePlanPercentage(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const data = await svc.updatePlanPercentage(req.params.id, req.user!.id, req.user!.role, req.body.percentage);
     res.json({ success: true, data });
   } catch (e) { next(e); }
 }
@@ -50,8 +57,8 @@ export async function applyPermission(req: Request, res: Response, next: NextFun
 
 export async function updateMyPermission(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const { permissionType, reason, date } = req.body;
-    const data = await svc.updateMyPermission(req.params.id, req.user!.id, { permissionType: permissionType as PermissionType, reason, dateStr: date });
+    const { reason } = req.body;
+    const data = await svc.updateMyPermission(req.params.id, req.user!.id, { reason });
     res.json({ success: true, data });
   } catch (e) { next(e); }
 }
@@ -65,7 +72,8 @@ export async function deleteMyPermission(req: Request, res: Response, next: Next
 
 export async function getPendingPermissions(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const data = await svc.getPendingPermissions(req.user!.id, req.user!.role);
+    const managerId = req.user!.role === 'MANAGER' ? req.user!.id : undefined;
+    const data = await svc.getPendingPermissions(managerId);
     res.json({ success: true, data });
   } catch (e) { next(e); }
 }

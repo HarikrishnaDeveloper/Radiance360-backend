@@ -1,7 +1,7 @@
 {
   "name": "crm-backend",
   "version": "1.0.0",
-  "description": "Production-ready CRM REST API — Node.js + Express + Prisma + PostgreSQL",
+  "description": "Production-ready Radience360 REST API — Node.js + Express + Prisma + PostgreSQL",
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
