@@ -20,6 +20,9 @@ const MAX_SIZE = 10 * 1024 * 1024; // 10 MB
 // Production (VPS): env.UPLOAD_DIR = /var/www/uploads
 // Development:      env.UPLOAD_DIR = '' → falls back to <project-root>/uploads
 export function getUploadDir(): string {
+  if (process.env.VERCEL) {
+    return env.UPLOAD_DIR || '/tmp/uploads';
+  }
   return env.UPLOAD_DIR || path.join(process.cwd(), 'uploads');
 }
 
@@ -110,3 +113,4 @@ function wrapUpload(uploadFn: (req: Request, res: Response, cb: (err: any) => vo
 
 export const handleLeadUpload = wrapUpload(leadUpload);
 export const handleTaskUpload = wrapUpload(taskUpload);
+

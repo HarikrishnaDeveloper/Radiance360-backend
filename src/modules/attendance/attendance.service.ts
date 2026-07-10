@@ -54,7 +54,16 @@ export async function calculateAttendance(record: any, permissions: any[]): Prom
   const halfDayHours = parseFloat(await getConfig('halfDayHours', '4'));
   const fullDayHours = parseFloat(await getConfig('fullDayHours', '8'));
 
-  if (!record.checkOut) return 'PENDING';
+  const hasApprovedLatePermission = permissions.some(
+    (p: any) => p.type === 'LATE_PERMISSION' && p.status === 'APPROVED'
+  );
+
+  if (!record.checkOut) {
+    if (record.checkInStatus !== 'ON_TIME') {
+      return hasApprovedLatePermission ? 'PRESENT' : 'LATE_PRESENT';
+    }
+    return 'PRESENT';
+  }
   const totalHours = record.totalHours ?? 0;
 
   let workedStatus = 'ABSENT';
@@ -70,11 +79,10 @@ export async function calculateAttendance(record: any, permissions: any[]): Prom
   if (approvedHalfDayLeave) return (workedStatus === 'FULL' || workedStatus === 'HALF') ? 'HALF_DAY_LEAVE_PRESENT' : 'HALF_DAY';
 
   if (workedStatus === 'FULL') {
-    if (record.checkInStatus === 'ON_TIME') return 'PRESENT';
-    if (record.checkInStatus === 'LATE' || record.checkInStatus === 'VERY_LATE') {
-      const approvedLatePerm = permissions.some((p: any) => p.type === 'LATE_PERMISSION' && p.status === 'APPROVED');
-      return approvedLatePerm ? 'PRESENT' : 'LATE_PRESENT';
+    if (record.checkInStatus !== 'ON_TIME') {
+      return hasApprovedLatePermission ? 'PRESENT' : 'LATE_PRESENT';
     }
+    return 'PRESENT';
   }
   if (workedStatus === 'HALF') return 'HALF_DAY';
   return 'ABSENT';
@@ -94,10 +102,15 @@ export async function checkIn(userId: string) {
   const now = new Date();
   const cis = await getCheckInStatus(now);
 
+  const permissions = await prisma.permission.findMany({ where: { userId, date: today } });
+  
+  const tempRecord = { date: today, checkIn: now, checkInStatus: cis, checkOut: null };
+  const initialStatus = await calculateAttendance(tempRecord, permissions);
+
   let record = await prisma.attendance.upsert({
     where: { userId_date: { userId, date: today } },
-    create: { userId, date: today, checkIn: now, status: 'PENDING', checkInStatus: cis },
-    update: { checkIn: now, status: 'PENDING', checkInStatus: cis },
+    create: { userId, date: today, checkIn: now, status: initialStatus as AttendanceStatus, checkInStatus: cis },
+    update: { checkIn: now, status: initialStatus as AttendanceStatus, checkInStatus: cis },
   });
 
   if (cis !== 'ON_TIME') {
@@ -355,6 +368,17 @@ export async function rejectPermission(id: string, approverId: string) {
     where: { id },
     data: { status: 'REJECTED' },
   });
+
+  const record = await prisma.attendance.findUnique({ where: { userId_date: { userId: pendingPerm.userId, date: pendingPerm.date } } });
+  if (record) {
+    const allPerms = await prisma.permission.findMany({ where: { userId: pendingPerm.userId, date: pendingPerm.date } });
+    const newStatus = await calculateAttendance(record, allPerms);
+    await prisma.attendance.update({
+      where: { id: record.id },
+      data: { status: newStatus }
+    });
+    emitGlobal('attendance:updated', { ...record, status: newStatus });
+  }
 
   return updatedPerm;
 }
