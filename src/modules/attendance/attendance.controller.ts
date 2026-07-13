@@ -70,10 +70,10 @@ export async function deleteMyPermission(req: Request, res: Response, next: Next
   } catch (e) { next(e); }
 }
 
-export async function getPendingPermissions(req: Request, res: Response, next: NextFunction): Promise<void> {
+export async function getTeamPermissions(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const managerId = req.user!.role === 'MANAGER' ? req.user!.id : undefined;
-    const data = await svc.getPendingPermissions(managerId);
+    const data = await svc.getTeamPermissions(managerId);
     res.json({ success: true, data });
   } catch (e) { next(e); }
 }

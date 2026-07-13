@@ -18,7 +18,7 @@ router.get('/stats',         ctrl.getDashboardStats);
 router.post('/permission/apply',              ctrl.applyPermission);
 router.put('/permission/my/:id',              ctrl.updateMyPermission);
 router.delete('/permission/my/:id',           ctrl.deleteMyPermission);
-router.get('/permission/team',  requireManager, ctrl.getPendingPermissions);
+router.get('/permission/team',  requireManager, ctrl.getTeamPermissions);
 router.patch('/permission/:id/approve', requireManager, ctrl.approvePermission);
 router.patch('/permission/:id/reject',  requireManager, ctrl.rejectPermission);
 

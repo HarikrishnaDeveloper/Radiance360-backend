@@ -317,21 +317,21 @@ export async function deleteMyPermission(id: string, userId: string) {
   return { success: true };
 }
 
-export async function getPendingPermissions(managerId?: string) {
+export async function getTeamPermissions(managerId?: string) {
   const adminExclusion = { user: { role: { notIn: ['SUPER_ADMIN', 'ADMIN'] as any } } };
 
   if (managerId) {
     const team = await prisma.user.findMany({ where: { managerId, status: 'ACTIVE' } });
     if (!team.length) return [];
     return prisma.permission.findMany({
-      where: { status: 'PENDING', userId: { in: team.map(t => t.id) } },
+      where: { userId: { in: team.map(t => t.id) } },
       include: { user: { select: { id: true, name: true, role: true } } },
       orderBy: { date: 'desc' },
     });
   }
 
   return prisma.permission.findMany({
-    where: { status: 'PENDING', ...adminExclusion },
+    where: { ...adminExclusion },
     include: { user: { select: { id: true, name: true, role: true } } },
     orderBy: { date: 'desc' },
   });
