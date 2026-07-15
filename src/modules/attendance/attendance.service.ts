@@ -7,13 +7,20 @@ import { emitGlobal } from '../../lib/socket';
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
+export function toUtcMidnightFromKolkata(dateIn: Date | string): Date {
+  const d = typeof dateIn === 'string' ? new Date(dateIn) : dateIn;
+  const options = { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' } as const;
+  const str = new Intl.DateTimeFormat('en-GB', options).format(d);
+  const [day, month, year] = str.split('/').map(Number);
+  return new Date(Date.UTC(year, month - 1, day));
+}
+
 function getTodayDate(): Date {
-  const d = new Date();
-  return new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  return toUtcMidnightFromKolkata(new Date());
 }
 
 function isSunday(date: Date): boolean {
-  return date.getDay() === 0;
+  return date.getUTCDay() === 0;
 }
 
 async function getCheckInStatus(time: Date): Promise<CheckInStatus> {
@@ -50,7 +57,7 @@ async function getCheckInStatus(time: Date): Promise<CheckInStatus> {
 
 
 export async function calculateAttendance(record: any, permissions: any[]): Promise<any> {
-  const isWeekend = record.date.getDay() === 0;
+  const isWeekend = record.date.getUTCDay() === 0;
   const halfDayHours = parseFloat(await getConfig('halfDayHours', '4'));
   const fullDayHours = parseFloat(await getConfig('fullDayHours', '8'));
 
@@ -64,6 +71,7 @@ export async function calculateAttendance(record: any, permissions: any[]): Prom
     }
     return 'PRESENT';
   }
+
   const totalHours = record.totalHours ?? 0;
 
   let workedStatus = 'ABSENT';
@@ -129,7 +137,7 @@ export async function checkIn(userId: string) {
           await createNotification({
             userId: recipientId,
             title: 'Late Check-In',
-            message: `${user.name} checked in ${cis === 'VERY_LATE' ? 'very late' : 'late'} at ${now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}.`,
+            message: `${user.name} checked in ${cis === 'VERY_LATE' ? 'very late' : 'late'} at ${new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true }).format(now)}.`,
             type: 'GENERAL',
             link: '/attendance',
           });
@@ -174,7 +182,8 @@ export async function checkOut(userId: string, dayCompletion?: string, planPerce
 
 export async function submitMorningPlan(userId: string, content: string) {
   const today = getTodayDate();
-  const hour = new Date().getHours();
+  const kolkataHour = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Kolkata', hour: 'numeric', hour12: false }).format(new Date());
+  const hour = parseInt(kolkataHour, 10);
 
   let field: 'morningPlan' | 'afternoonPlan' = 'morningPlan';
   let planType = 'Morning';
@@ -245,10 +254,13 @@ export async function getTodayAttendance(userId: string) {
 
 export async function getMyAttendance(userId: string, month?: number, year?: number) {
   const now = new Date();
-  const m = month ?? now.getMonth() + 1;
-  const y = year ?? now.getFullYear();
-  const start = new Date(y, m - 1, 1);
-  const end = new Date(y, m, 0, 23, 59, 59);
+  const kolkata = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Kolkata', year: 'numeric', month: 'numeric' }).format(now);
+  const [currentMonth, currentYear] = kolkata.split('/').map(Number);
+
+  const m = month ?? currentMonth;
+  const y = year ?? currentYear;
+  const start = new Date(Date.UTC(y, m - 1, 1));
+  const end = new Date(Date.UTC(y, m, 0, 23, 59, 59, 999));
 
   return prisma.attendance.findMany({
     where: { userId, date: { gte: start, lte: end } },
@@ -268,11 +280,8 @@ export async function applyPermission(userId: string, permissionType: Permission
 
   if (reasonMandatory && (!reason || !reason.trim())) throw new AppError('Reason is required.', 400);
   
-  const target = dateStr ? new Date(dateStr) : new Date();
-  target.setUTCHours(0, 0, 0, 0);
-
-  const today = new Date();
-  today.setUTCHours(0, 0, 0, 0);
+  const target = dateStr ? toUtcMidnightFromKolkata(new Date(dateStr)) : getTodayDate();
+  const today = getTodayDate();
 
   if (!allowBackdated && target < today) throw new AppError('Invalid Date: Backdated permissions are not allowed.', 400);
 
@@ -318,8 +327,6 @@ export async function deleteMyPermission(id: string, userId: string) {
 }
 
 export async function getTeamPermissions(managerId?: string) {
-  const adminExclusion = { user: { role: { notIn: ['SUPER_ADMIN', 'ADMIN'] as any } } };
-
   if (managerId) {
     const team = await prisma.user.findMany({ where: { managerId, status: 'ACTIVE' } });
     if (!team.length) return [];
@@ -331,7 +338,6 @@ export async function getTeamPermissions(managerId?: string) {
   }
 
   return prisma.permission.findMany({
-    where: { ...adminExclusion },
     include: { user: { select: { id: true, name: true, role: true } } },
     orderBy: { date: 'desc' },
   });
@@ -386,8 +392,7 @@ export async function rejectPermission(id: string, approverId: string) {
 // ── Admin / Manager Views ──────────────────────────────────────────────────────
 
 export async function getTeamAttendance(managerId: string, dateStr?: string) {
-  const target = dateStr ? new Date(dateStr) : new Date();
-  target.setHours(0, 0, 0, 0);
+  const target = dateStr ? toUtcMidnightFromKolkata(new Date(dateStr)) : getTodayDate();
 
   const team = await prisma.user.findMany({ where: { managerId, status: 'ACTIVE' } });
   const ids = team.map((m) => m.id);
@@ -404,18 +409,15 @@ export async function getAllAttendance(
   year?: number,
   statusFilter?: string,
 ) {
-  // SUPER_ADMIN and ADMIN are never part of attendance calculations
-  const andConditions: Record<string, unknown>[] = [
-    { user: { role: { notIn: ['SUPER_ADMIN', 'ADMIN'] } } },
-  ];
+  const andConditions: Record<string, unknown>[] = [];
+
 
   if (dateStr) {
-    const d = new Date(dateStr);
-    d.setHours(0, 0, 0, 0);
+    const d = toUtcMidnightFromKolkata(new Date(dateStr));
     andConditions.push({ date: d });
   } else if (month && year) {
-    const start = new Date(year, month - 1, 1);
-    const end = new Date(year, month, 0, 23, 59, 59);
+    const start = new Date(Date.UTC(year, month - 1, 1));
+    const end = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
     andConditions.push({ date: { gte: start, lte: end } });
   } else {
     andConditions.push({ date: getTodayDate() });
@@ -513,7 +515,7 @@ export async function autoMarkAttendance() {
   const weekend = isSunday(today);
 
   const users = await prisma.user.findMany({
-    where: { status: 'ACTIVE', role: { notIn: ['SUPER_ADMIN', 'ADMIN'] } },
+    where: { status: 'ACTIVE' },
   });
 
   // 1. Mark missing checkouts from past days as PENDING
@@ -527,6 +529,7 @@ export async function autoMarkAttendance() {
     data: { status: 'PENDING' },
   });
 
+  let createdCount = 0;
   const results = await Promise.all(
     users.map(async (u) => {
       const existing = await prisma.attendance.findUnique({
@@ -538,15 +541,17 @@ export async function autoMarkAttendance() {
       }
 
       const weekend = isSunday(today);
-    const defaultStatus: AttendanceStatus = weekend ? 'WEEK_OFF' : 'NOT_MARKED';
+      const defaultStatus: AttendanceStatus = weekend ? 'WEEK_OFF' : 'NOT_MARKED';
       const newRecord = await prisma.attendance.create({
         data: { userId: u.id, date: today, status: defaultStatus },
       });
-
+      createdCount++;
       return newRecord;
     }),
   );
-  emitGlobal('attendance:updated', { date: today, action: 'autoMarkAttendance' });
+  if (createdCount > 0) {
+    emitGlobal('attendance:updated', { date: today, action: 'autoMarkAttendance' });
+  }
   return results;
 }
 
@@ -555,9 +560,7 @@ export async function autoMarkAttendance() {
 export async function getDashboardStats(role: string, userId: string) {
   const today = getTodayDate();
 
-  // SUPER_ADMIN and ADMIN records never count in attendance stats
-  const adminExclusion: any = { user: { role: { notIn: ['SUPER_ADMIN', 'ADMIN'] } } };
-  let base: Record<string, unknown> = { date: today, ...adminExclusion };
+  let base: Record<string, unknown> = { date: today };
 
   if (role === 'MANAGER') {
     const team = await prisma.user.findMany({ where: { managerId: userId, status: 'ACTIVE' } });
@@ -580,7 +583,7 @@ export async function getDashboardStats(role: string, userId: string) {
         },
       }),
       prisma.attendance.count({ where: { ...base, status: 'HALF_DAY' } }),
-      prisma.permission.count({ where: { status: 'PENDING', ...adminExclusion } }),
+      prisma.permission.count({ where: { status: 'PENDING' } }),
       prisma.permission.count({ where: { status: 'APPROVED', userId: base.userId as any } }),
       // Active Now = checked in but not checked out
       prisma.attendance.count({ where: { ...base, checkIn: { not: null }, checkOut: null } }),
@@ -602,37 +605,56 @@ export async function getDashboardStats(role: string, userId: string) {
 // ── Team Hierarchy ─────────────────────────────────────────────────────────────
 
 export async function getTeamHierarchy(dateStr?: string) {
-  const target = dateStr ? new Date(dateStr) : getTodayDate();
+  const target = dateStr ? toUtcMidnightFromKolkata(new Date(dateStr)) : getTodayDate();
 
   const users = await prisma.user.findMany({
-    where: { status: 'ACTIVE', role: { notIn: ['SUPER_ADMIN', 'ADMIN'] } },
+    where: { status: 'ACTIVE' },
     include: {
       attendance: { where: { date: target }, take: 1 },
     },
   });
 
+  const superAdmins = users.filter(u => u.role === 'SUPER_ADMIN');
   const admins = users.filter(u => u.role === 'ADMIN');
   const managers = users.filter(u => u.role === 'MANAGER');
   const employees = users.filter(u => u.role === 'EMPLOYEE');
 
-  return admins.map(admin => ({
-    admin: {
-      id: admin.id,
-      name: admin.name,
-      role: admin.role,
-      attendance: admin.attendance[0] ?? null,
+  return superAdmins.map(sa => ({
+    superAdmin: {
+      id: sa.id,
+      name: sa.name,
+      role: sa.role,
+      attendance: sa.attendance[0] ?? null,
     },
-    teams: managers
-      .filter(m => m.managerId === admin.id)
-      .map(tl => ({
-        teamLeader: {
-          id: tl.id,
-          name: tl.name,
-          role: tl.role,
-          attendance: tl.attendance[0] ?? null,
+    admins: admins
+      .filter(a => a.managerId === sa.id || !a.managerId)
+      .map(admin => ({
+        admin: {
+          id: admin.id,
+          name: admin.name,
+          role: admin.role,
+          attendance: admin.attendance[0] ?? null,
         },
-        employees: employees
-          .filter(e => e.managerId === tl.id)
+        teams: managers
+          .filter(m => m.managerId === admin.id)
+          .map(tl => ({
+            teamLeader: {
+              id: tl.id,
+              name: tl.name,
+              role: tl.role,
+              attendance: tl.attendance[0] ?? null,
+            },
+            employees: employees
+              .filter(e => e.managerId === tl.id)
+              .map(emp => ({
+                id: emp.id,
+                name: emp.name,
+                role: emp.role,
+                attendance: emp.attendance[0] ?? null,
+              })),
+          })),
+        directEmployees: employees
+          .filter(e => e.managerId === admin.id)
           .map(emp => ({
             id: emp.id,
             name: emp.name,
@@ -640,28 +662,19 @@ export async function getTeamHierarchy(dateStr?: string) {
             attendance: emp.attendance[0] ?? null,
           })),
       })),
-    // Employees directly under admin (no TL)
-    directEmployees: employees
-      .filter(e => e.managerId === admin.id)
-      .map(emp => ({
-        id: emp.id,
-        name: emp.name,
-        role: emp.role,
-        attendance: emp.attendance[0] ?? null,
-      })),
   }));
 }
 
 // ── Performance Stats (Monthly Weighted Score) ─────────────────────────────────
 
 export async function getPerformanceStats(month: number, year: number) {
-  const start = new Date(year, month - 1, 1);
-  const end = new Date(year, month, 0, 23, 59, 59);
+  const start = new Date(Date.UTC(year, month - 1, 1));
+  const end = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
 
   const records = await prisma.attendance.findMany({
     where: {
       date: { gte: start, lte: end },
-      user: { role: { not: 'SUPER_ADMIN' }, status: 'ACTIVE' },
+      user: { status: 'ACTIVE' },
     },
     include: { user: { select: { id: true, name: true, role: true } } },
   });
@@ -724,8 +737,7 @@ export async function createCorrectionRequest(
 ) {
   if (!data.reason?.trim()) throw new AppError('Reason is required', 400);
 
-  const target = new Date(data.date);
-  target.setUTCHours(0, 0, 0, 0);
+  const target = toUtcMidnightFromKolkata(new Date(data.date));
 
   const attendance = await prisma.attendance.findUnique({
     where: { userId_date: { userId, date: target } },
@@ -892,13 +904,12 @@ export interface AttendanceReportOptions {
 
 function formatTime(dt: Date | null | undefined): string {
   if (!dt) return '-';
-  return new Date(dt).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+  return new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true }).format(new Date(dt));
 }
 
 function formatDate(dt: Date | null | undefined): string {
   if (!dt) return '-';
-  const d = new Date(dt);
-  return `${String(d.getUTCDate()).padStart(2, '0')}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${d.getUTCFullYear()}`;
+  return new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Kolkata', day: '2-digit', month: '2-digit', year: 'numeric' }).format(new Date(dt)).replace(/\//g, '-');
 }
 
 export async function getAttendanceReportData(opts: AttendanceReportOptions) {
@@ -910,22 +921,26 @@ export async function getAttendanceReportData(opts: AttendanceReportOptions) {
   let reportLabel: string;
 
   if (periodType === 'monthly') {
-    const m = month ?? now.getMonth() + 1;
-    const y = year ?? now.getFullYear();
-    start = new Date(y, m - 1, 1);
-    end = new Date(y, m, 0, 23, 59, 59);
-    reportLabel = `${new Date(y, m - 1).toLocaleString('en-IN', { month: 'long' })} ${y}`;
+    const kolkata = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Kolkata', year: 'numeric', month: 'numeric' }).format(now);
+    const [currentMonth, currentYear] = kolkata.split('/').map(Number);
+    const m = month ?? currentMonth;
+    const y = year ?? currentYear;
+    start = new Date(Date.UTC(y, m - 1, 1));
+    end = new Date(Date.UTC(y, m, 0, 23, 59, 59, 999));
+    reportLabel = `${new Intl.DateTimeFormat('en-IN', { timeZone: 'UTC', month: 'long' }).format(start)} ${y}`;
   } else if (periodType === 'yearly') {
-    const y = year ?? now.getFullYear();
-    start = new Date(y, 0, 1);
-    end = new Date(y, 11, 31, 23, 59, 59);
+    const kolkata = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Kolkata', year: 'numeric' }).format(now);
+    const currentYear = Number(kolkata);
+    const y = year ?? currentYear;
+    start = new Date(Date.UTC(y, 0, 1));
+    end = new Date(Date.UTC(y, 11, 31, 23, 59, 59, 999));
     reportLabel = `Year ${y}`;
   } else {
     // custom
     if (!startDate || !endDate) throw new AppError('startDate and endDate are required for custom range', 400);
-    start = new Date(startDate);
-    end = new Date(endDate);
-    end.setHours(23, 59, 59);
+    start = toUtcMidnightFromKolkata(new Date(startDate));
+    end = toUtcMidnightFromKolkata(new Date(endDate));
+    end.setUTCHours(23, 59, 59, 999);
     if (isNaN(start.getTime()) || isNaN(end.getTime())) throw new AppError('Invalid date range', 400);
     if (start > end) throw new AppError('startDate must be before endDate', 400);
     reportLabel = `${formatDate(start)} to ${formatDate(end)}`;
@@ -933,7 +948,6 @@ export async function getAttendanceReportData(opts: AttendanceReportOptions) {
 
   // Build user scope filter
   const userWhereConditions: Record<string, unknown> = {
-    role: { not: 'SUPER_ADMIN' as const },
     status: 'ACTIVE' as const,
   };
 
@@ -962,17 +976,12 @@ export async function getAttendanceReportData(opts: AttendanceReportOptions) {
 
   // Group by user
   const byUser = new Map<string, {
-    name: string;
-    email: string;
-    role: string;
-    present: number;
-    absent: number;
-    late: number;
-    halfDay: number;
-    leave: number;
-    weekOff: number;
-    notMarked: number;
+    name: string; email: string; role: string;
+    present: number; absent: number; late: number; halfDay: number;
+    leave: number; weekOff: number; holiday: number; notMarked: number;
     totalHours: number;
+    workingDays: number; attendancePercentage: string; performancePercentage: string;
+    overtime: string; permissionCount: number; correctionCount: number; lateCount: number;
     rows: {
       date: string;
       status: string;
@@ -992,11 +1001,11 @@ export async function getAttendanceReportData(opts: AttendanceReportOptions) {
 
     if (!byUser.has(uid)) {
       byUser.set(uid, {
-        name: r.user.name,
-        email: r.user.email,
-        role: r.user.role,
+        name: r.user.name, email: r.user.email, role: r.user.role,
         present: 0, absent: 0, late: 0, halfDay: 0,
-        leave: 0, weekOff: 0, notMarked: 0, totalHours: 0,
+        leave: 0, weekOff: 0, holiday: 0, notMarked: 0,
+        totalHours: 0, workingDays: 0, attendancePercentage: '0%', performancePercentage: '0%',
+        overtime: '0', permissionCount: 0, correctionCount: 0, lateCount: 0,
         rows: [],
       });
     }
@@ -1006,11 +1015,12 @@ export async function getAttendanceReportData(opts: AttendanceReportOptions) {
       ((r.status === 'PRESENT') && (r.checkInStatus === 'LATE' || r.checkInStatus === 'VERY_LATE'));
 
     if (r.status === 'PRESENT' && !isLate) stat.present++;
-    else if (isLate) stat.late++;
+    else if (isLate) { stat.late++; stat.lateCount++; }
     else if (r.status === 'ABSENT') stat.absent++;
     else if (r.status === 'HALF_DAY') stat.halfDay++;
-    else if (r.status === 'LEAVE') stat.leave++;
-    else if (r.status === 'WEEK_OFF') stat.weekOff++;
+    else if (r.status === 'LEAVE' || r.status === 'HALF_DAY_LEAVE_PRESENT') stat.leave++;
+    else if (r.status === 'WEEK_OFF' || r.status === 'WEEK_OFF_WORKED') stat.weekOff++;
+    else if (r.status === 'HOLIDAY' || r.status === 'HOLIDAY_WORKED') stat.holiday++;
     else if (r.status === 'NOT_MARKED') stat.notMarked++;
 
     if (r.totalHours) stat.totalHours += r.totalHours;
@@ -1026,6 +1036,43 @@ export async function getAttendanceReportData(opts: AttendanceReportOptions) {
       permissionType: '-',
       remarks: r.remarks ?? '-',
     });
+  }
+
+  const userIds = Array.from(byUser.keys());
+  
+  const [allPerms, allCorrs] = await Promise.all([
+    prisma.permission.findMany({
+      where: { date: { gte: start, lte: end }, userId: { in: userIds } },
+      select: { userId: true },
+    }),
+    prisma.attendanceCorrectionRequest.findMany({
+      where: { date: { gte: start, lte: end }, userId: { in: userIds } },
+      select: { userId: true },
+    })
+  ]);
+
+  for (const p of allPerms) {
+    const stat = byUser.get(p.userId);
+    if (stat) stat.permissionCount++;
+  }
+  for (const c of allCorrs) {
+    const stat = byUser.get(c.userId);
+    if (stat) stat.correctionCount++;
+  }
+
+  for (const stat of byUser.values()) {
+    stat.workingDays = stat.present + stat.late + stat.halfDay + stat.leave + stat.absent;
+    const expectedHours = stat.workingDays * 8; // Assumes 8h full day
+    stat.overtime = stat.totalHours > expectedHours ? (stat.totalHours - expectedHours).toFixed(2) : '0';
+
+    if (stat.workingDays > 0) {
+      stat.attendancePercentage = (((stat.present + stat.late + (stat.halfDay * 0.5) + stat.leave) / stat.workingDays) * 100).toFixed(1) + '%';
+    }
+
+    const workingForPerf = stat.present + stat.late + stat.halfDay + stat.absent;
+    if (workingForPerf > 0) {
+      stat.performancePercentage = (((stat.present + stat.late * 0.75 + stat.halfDay * 0.5) / workingForPerf) * 100).toFixed(1) + '%';
+    }
   }
 
   return {
@@ -1055,8 +1102,8 @@ export function buildAttendanceCsvFromData(
 
   const summaryHeaders = [
     'Employee Name', 'Email', 'Role',
-    'Present', 'Late', 'Absent', 'Half Day', 'Leave', 'Sunday', 'Not Marked',
-    'Total Hours Worked',
+    'Present', 'Late', 'Half Day', 'Leave', 'Week Off', 'Holiday', 'Absent', 'Not Marked', 
+    'Working Days', 'Attendance %', 'Performance %', 'Hours Worked', 'Overtime', 'Late Count', 'Permission Count', 'Correction Count'
   ];
 
   // ─── SUMMARY SECTION ────────────────────────────────────────────────────────
@@ -1066,9 +1113,8 @@ export function buildAttendanceCsvFromData(
   for (const emp of report.employees) {
     lines.push([
       `"${emp.name}"`, `"${emp.email}"`, `"${emp.role}"`,
-      emp.present, emp.late, emp.absent, emp.halfDay,
-      emp.leave, emp.weekOff, emp.notMarked,
-      `"${emp.totalHours.toFixed(2)}"`,
+      emp.present, emp.late, emp.halfDay, emp.leave, emp.weekOff, emp.holiday, emp.absent, emp.notMarked,
+      emp.workingDays, `"${emp.attendancePercentage}"`, `"${emp.performancePercentage}"`, `"${emp.totalHours.toFixed(2)}"`, `"${emp.overtime}"`, emp.lateCount, emp.permissionCount, emp.correctionCount,
     ].join(','));
   }
 
